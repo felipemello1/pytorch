@@ -586,7 +586,16 @@ class TestC10dTorchCommsNewGroupHelper(TestCase):
 
     TIMEOUT = datetime.timedelta(seconds=30)
 
-    def _drive_member(self, *, backend, device_id, group_rank, group_size):
+    def _drive_member(
+        self,
+        *,
+        backend,
+        device_id,
+        group_rank,
+        group_size,
+        enable_reconfigure=False,
+        timeout=TIMEOUT,
+    ):
         """Drive the members path down to ``new_comm``.
 
         ``new_comm`` is mocked to capture its device argument and the live env,
@@ -596,9 +605,17 @@ class TestC10dTorchCommsNewGroupHelper(TestCase):
         """
         captured = {}
 
-        def fake_new_comm(backend_str, device, name=None, store=None, hints=None):
+        def fake_new_comm(
+            backend_str,
+            device,
+            name=None,
+            store=None,
+            hints=None,
+            **kwargs,
+        ):
             captured["backend_str"] = backend_str
             captured["device"] = device
+            captured["extra_kwargs"] = kwargs
             captured["rank_env"] = os.environ.get("TORCHCOMM_RANK")
             captured["size_env"] = os.environ.get("TORCHCOMM_SIZE")
             raise RuntimeError("stop-after-new_comm")
@@ -619,10 +636,144 @@ class TestC10dTorchCommsNewGroupHelper(TestCase):
                     backend=backend,
                     store=dist.HashStore(),
                     group_name=c10d.GroupName(self.id()),
-                    timeout=self.TIMEOUT,
+                    timeout=timeout,
                     device_id=device_id,
+                    enable_reconfigure=enable_reconfigure,
                 )
         return captured
+
+    def test_new_comm_options_are_dynamic_only(self):
+        dynamic = self._drive_member(
+            backend="nccl",
+            device_id=torch.device("cuda:1"),
+            group_rank=1,
+            group_size=4,
+            enable_reconfigure=True,
+            timeout=self.TIMEOUT,
+        )
+        self.assertEqual(
+            dynamic["extra_kwargs"],
+            {"timeout": self.TIMEOUT, "enable_reconfigure": True},
+        )
+
+        static = self._drive_member(
+            backend="nccl",
+            device_id=torch.device("cuda:1"),
+            group_rank=1,
+            group_size=4,
+        )
+        self.assertEqual(static["extra_kwargs"], {})
+
+    def test_backend_wrapper_and_options_match_creation_mode(self):
+        for enable_reconfigure, timeout, expected_options in (
+            (False, self.TIMEOUT, {}),
+            (
+                True,
+                self.TIMEOUT,
+                {"timeout": self.TIMEOUT, "enable_reconfigure": True},
+            ),
+            (True, None, {"enable_reconfigure": True}),
+        ):
+            with self.subTest(enable_reconfigure=enable_reconfigure, timeout=timeout):
+                new_comm = mock.Mock(return_value=mock.sentinel.comm)
+                backend_wrapper_instance = mock.Mock()
+                backend_wrapper = mock.Mock(return_value=backend_wrapper_instance)
+                recorder = mock.MagicMock()
+                previous_count = len(c10d._world.comms)
+                try:
+                    with mock.patch.multiple(
+                        c10d,
+                        _TORCHCOMM_AVAILABLE=True,
+                        new_comm=new_comm,
+                        _BackendWrapper=backend_wrapper,
+                        _TorchCommsFlightRecorderHook=mock.Mock(return_value=recorder),
+                        create=True,
+                    ):
+                        result = c10d._create_torchcomms_backend(
+                            "mccl",
+                            "cuda",
+                            group_rank=2,
+                            group_size=4,
+                            group_name=c10d.GroupName(self.id()),
+                            store=dist.HashStore(),
+                            device_id=torch.device("cuda:1"),
+                            backend_options=None,
+                            timeout=timeout,
+                            enable_reconfigure=enable_reconfigure,
+                        )
+                finally:
+                    del c10d._world.comms[previous_count:]
+
+                self.assertIs(result, backend_wrapper_instance)
+                backend_wrapper.assert_called_once_with(mock.sentinel.comm)
+                recorder.register_with_comm.assert_called_once_with(mock.sentinel.comm)
+                new_comm.assert_called_once()
+                actual_options = {
+                    key: value
+                    for key, value in new_comm.call_args.kwargs.items()
+                    if key in {"timeout", "enable_reconfigure"}
+                }
+                self.assertEqual(actual_options, expected_options)
+                backend_wrapper_instance.set_timeout.assert_not_called()
+
+    def test_backend_wrapper_failure_does_not_register_or_publish_comm(self):
+        previous_count = len(c10d._world.comms)
+        recorder = mock.Mock()
+        with mock.patch.multiple(
+            c10d,
+            _TORCHCOMM_AVAILABLE=True,
+            new_comm=mock.Mock(return_value=mock.sentinel.comm),
+            _BackendWrapper=mock.Mock(side_effect=RuntimeError("wrapper failed")),
+            _TorchCommsFlightRecorderHook=mock.Mock(return_value=recorder),
+            create=True,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "wrapper failed"):
+                c10d._create_torchcomms_backend(
+                    "mccl",
+                    "cuda",
+                    group_rank=2,
+                    group_size=4,
+                    group_name=c10d.GroupName(self.id()),
+                    store=dist.HashStore(),
+                    device_id=torch.device("cuda:1"),
+                    backend_options=None,
+                    timeout=self.TIMEOUT,
+                    enable_reconfigure=True,
+                )
+
+        self.assertEqual(len(c10d._world.comms), previous_count)
+        recorder.register_with_comm.assert_not_called()
+
+    def test_recorder_failure_does_not_publish_comm(self):
+        previous_count = len(c10d._world.comms)
+        recorder = mock.Mock()
+        recorder.register_with_comm.side_effect = RuntimeError("recorder failed")
+        backend_wrapper = mock.Mock()
+        with mock.patch.multiple(
+            c10d,
+            _TORCHCOMM_AVAILABLE=True,
+            new_comm=mock.Mock(return_value=mock.sentinel.comm),
+            _BackendWrapper=backend_wrapper,
+            _TorchCommsFlightRecorderHook=mock.Mock(return_value=recorder),
+            create=True,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "recorder failed"):
+                c10d._create_torchcomms_backend(
+                    "mccl",
+                    "cuda",
+                    group_rank=2,
+                    group_size=4,
+                    group_name=c10d.GroupName(self.id()),
+                    store=dist.HashStore(),
+                    device_id=torch.device("cuda:1"),
+                    backend_options=None,
+                    timeout=self.TIMEOUT,
+                    enable_reconfigure=True,
+                )
+
+        self.assertEqual(len(c10d._world.comms), previous_count)
+        backend_wrapper.assert_called_once_with(mock.sentinel.comm)
+        backend_wrapper.return_value.set_timeout.assert_not_called()
 
     def test_new_comm_gets_indexed_device_id(self):
         # A subgroup's group-local rank differs from the rank's physical device,
