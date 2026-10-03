@@ -1,4 +1,5 @@
 # Owner(s): ["module: sdpa"]
+import itertools
 import math
 import unittest
 from collections import namedtuple
@@ -1638,6 +1639,74 @@ class TestVarlenAttention(NNTestCase):
             raise AssertionError(
                 "cuDNN varlen attention forward should have been called"
             )
+
+    @unittest.skipUnless(
+        SM100OrLater and not SM120OrLater, "FA4 split-KV requires SM100"
+    )
+    def test_fa4_seqlen_k_per_split_batch_invariance(self, device):
+        """A fixed split size keeps split-KV batch invariant: decoding a sequence alone,
+        in a batch, and the last row of a causal forward over it give the same bits."""
+        torch.manual_seed(0)
+        split, num_heads, head_dim = 256, 2, 128
+        target_len, extra_len = 700, 2000
+        q, k, v = (
+            torch.randn(
+                target_len + extra_len,
+                num_heads,
+                head_dim,
+                device=device,
+                dtype=torch.bfloat16,
+            )
+            for _ in range(3)
+        )
+
+        def attend(q_rows, cu_seq_q, cu_seq_k, max_q, max_k):
+            return varlen_attn(
+                q_rows,
+                k,
+                v,
+                cu_seq_q,
+                cu_seq_k,
+                max_q,
+                max_k,
+                window_size=(-1, 0),
+                num_splits=max(2, math.ceil(max_k / split)),
+                seqlen_k_per_split=split,
+            )
+
+        def cu_seq(*lengths):
+            return torch.tensor(
+                [0, *itertools.accumulate(lengths)], device=device, dtype=torch.int32
+            )
+
+        last_rows = [target_len - 1, target_len + extra_len - 1]
+        with _use_backend("fa4"), torch.no_grad():
+            solo = attend(
+                q[last_rows[:1]], cu_seq(1), cu_seq(target_len), 1, target_len
+            )
+            batched = attend(
+                q[last_rows], cu_seq(1, 1), cu_seq(target_len, extra_len), 1, extra_len
+            )
+            forward = attend(
+                q[:target_len],
+                cu_seq(target_len),
+                cu_seq(target_len),
+                target_len,
+                target_len,
+            )
+            with self.assertRaisesRegex(RuntimeError, "num_splits >= 2"):
+                varlen_attn(
+                    q[:1],
+                    k,
+                    v,
+                    cu_seq(1),
+                    cu_seq(target_len),
+                    1,
+                    target_len,
+                    seqlen_k_per_split=split,
+                )
+        self.assertEqual(solo[0], batched[0], atol=0, rtol=0)
+        self.assertEqual(solo[0], forward[-1], atol=0, rtol=0)
 
     @unittest.skipIf(
         not PLATFORM_SUPPORTS_FLASH_ATTENTION, "Flash Attention not supported"

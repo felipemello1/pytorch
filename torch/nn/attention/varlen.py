@@ -116,6 +116,7 @@ def _cudnn_rejection_reasons(
     seqused_k: torch.Tensor | None = None,
     block_table: torch.Tensor | None = None,
     num_splits: int | None = None,
+    seqlen_k_per_split: int | None = None,
 ) -> list[str]:
     """Return the constraints preventing cuDNN varlen attention."""
     reasons = []
@@ -161,6 +162,8 @@ def _cudnn_rejection_reasons(
         reasons.append("window_size must be (-1, -1) or causal (-1, 0)")
     if num_splits is not None:
         reasons.append("num_splits is not supported")
+    if seqlen_k_per_split is not None:
+        reasons.append("seqlen_k_per_split is not supported")
     if block_table is not None:
         page_size = key.size(1)
         if page_size <= 0 or page_size & (page_size - 1):
@@ -181,6 +184,7 @@ def _select_backend(
     seqused_k: torch.Tensor | None = None,
     block_table: torch.Tensor | None = None,
     num_splits: int | None = None,
+    seqlen_k_per_split: int | None = None,
 ) -> int:
     """Select the first eligible varlen backend in the SDPA priority order."""
     cudnn_enabled = torch._C._get_cudnn_sdp_enabled()
@@ -197,6 +201,7 @@ def _select_backend(
             seqused_k,
             block_table,
             num_splits,
+            seqlen_k_per_split,
         )
         if cudnn_enabled
         else []
@@ -245,6 +250,7 @@ def _varlen_attn(
     seqused_k: torch.Tensor | None = None,
     block_table: torch.Tensor | None = None,
     num_splits: int | None = None,
+    seqlen_k_per_split: int | None = None,
     backend: int = _FLASH_ATTENTION_BACKEND,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
@@ -294,6 +300,7 @@ def _varlen_attn(
             seqused_k=seqused_k,
             block_table=block_table,
             num_splits=num_splits,
+            seqlen_k_per_split=seqlen_k_per_split,
         )
     else:
         raise AssertionError(f"Unsupported varlen attention backend: {backend}")
@@ -320,6 +327,7 @@ def _varlen_attn_fake(
     seqused_k: torch.Tensor | None = None,
     block_table: torch.Tensor | None = None,
     num_splits: int | None = None,
+    seqlen_k_per_split: int | None = None,
     backend: int = _FLASH_ATTENTION_BACKEND,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
@@ -361,6 +369,7 @@ def varlen_attn(
     seqused_k: torch.Tensor | None = None,
     block_table: torch.Tensor | None = None,
     num_splits: int | None = None,
+    seqlen_k_per_split: int | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     r"""Compute variable-length attention using Flash Attention.
 
@@ -415,6 +424,11 @@ def varlen_attn(
             regardless of what other sequences are in the batch, at the
             cost of lower GPU utilization when there are few queries. When
             ``None`` (default), the kernel chooses automatically.
+        seqlen_k_per_split (int, optional): FA4 only. Split-KV with a fixed number of
+            key tokens per split, a multiple of 128; requires
+            ``num_splits >= ceil(max_k / seqlen_k_per_split)`` and at least 2. Every sequence
+            is split at the same absolute key positions, so split-KV stays batch invariant,
+            and decode matches a forward over the whole sequence with the same value.
 
     Returns:
         output (Tensor): Output tensor from attention computation; shape :math:`(T_q, H_q, D)`.
@@ -492,6 +506,7 @@ def varlen_attn(
         seqused_k,
         block_table,
         num_splits,
+        seqlen_k_per_split,
     )
     out, lse, _ = torch.ops.torch_attn._varlen_attn(
         query,
@@ -508,6 +523,7 @@ def varlen_attn(
         seqused_k,
         block_table,
         num_splits,
+        seqlen_k_per_split,
         backend,
     )
     if return_aux is not None and return_aux.lse:
@@ -532,6 +548,7 @@ def _varlen_attn_out(
     seqused_k: torch.Tensor | None = None,
     block_table: torch.Tensor | None = None,
     num_splits: int | None = None,
+    seqlen_k_per_split: int | None = None,
     backend: int = _FLASH_ATTENTION_BACKEND,
 ) -> torch.Tensor:
     """
@@ -576,6 +593,7 @@ def _varlen_attn_out(
             seqused_k=seqused_k,
             block_table=block_table,
             num_splits=num_splits,
+            seqlen_k_per_split=seqlen_k_per_split,
         )
     raise AssertionError(f"Unsupported varlen attention backend: {backend}")
 
@@ -597,6 +615,7 @@ def _varlen_attn_out_fake(
     seqused_k: torch.Tensor | None = None,
     block_table: torch.Tensor | None = None,
     num_splits: int | None = None,
+    seqlen_k_per_split: int | None = None,
     backend: int = _FLASH_ATTENTION_BACKEND,
 ) -> torch.Tensor:
     """
@@ -628,6 +647,7 @@ def varlen_attn_out(
     seqused_k: torch.Tensor | None = None,
     block_table: torch.Tensor | None = None,
     num_splits: int | None = None,
+    seqlen_k_per_split: int | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     r"""Compute variable-length attention with a pre-allocated output tensor.
 
@@ -664,6 +684,7 @@ def varlen_attn_out(
         seqused_k,
         block_table,
         num_splits,
+        seqlen_k_per_split,
     )
     lse = torch.ops.torch_attn._varlen_attn_out(
         out,
@@ -681,6 +702,7 @@ def varlen_attn_out(
         seqused_k,
         block_table,
         num_splits,
+        seqlen_k_per_split,
         backend,
     )
     if return_aux is not None and return_aux.lse:
@@ -704,6 +726,7 @@ def _setup_context(ctx: Any, inputs: tuple[Any, ...], output: Any) -> None:
         seqused_k,
         block_table,
         num_splits,
+        seqlen_k_per_split,
         backend,
     ) = inputs
     out, lse, rng_state = output
@@ -851,8 +874,8 @@ def _backward(
         ctx.backend,
     )
     # cu_seq_q, cu_seq_k, max_q, max_k, is_causal, scale, window_size, \
-    # enable_gqa, seqused_k, block_table, num_splits, backend
-    num_params = 12
+    # enable_gqa, seqused_k, block_table, num_splits, seqlen_k_per_split, backend
+    num_params = 13
     return (dq, dk, dv, *((None,) * num_params))
 
 
