@@ -412,7 +412,12 @@ def _fa3_flash_attention_forward_impl(
     block_table: torch.Tensor | None = None,
     compute_auxiliary: bool = True,
     num_splits: int | None = None,
+    seqlen_k_per_split: int | None = None,
 ):
+    if seqlen_k_per_split is not None:
+        raise RuntimeError(
+            "FA3 flash_attention forward unsupported: seqlen_k_per_split requires FA4"
+        )
     error = _fa3_forward_support_error(
         query,
         key,
@@ -479,6 +484,7 @@ def _fa3_flash_attention_forward_no_dropout_inplace_impl(
     alibi_slopes: torch.Tensor | None = None,
     block_table: torch.Tensor | None = None,
     num_splits: int | None = None,
+    seqlen_k_per_split: int | None = None,
 ):
     _, lse, _, _, _ = _fa3_flash_attention_forward_impl(
         query,
@@ -503,6 +509,7 @@ def _fa3_flash_attention_forward_no_dropout_inplace_impl(
         block_table=block_table,
         compute_auxiliary=False,
         num_splits=num_splits,
+        seqlen_k_per_split=seqlen_k_per_split,
     )
     return lse
 
@@ -527,6 +534,7 @@ def _fa3_flash_attention_forward_impl_default(
     block_table: torch.Tensor | None = None,
     out: torch.Tensor | None = None,
     num_splits: int | None = None,
+    seqlen_k_per_split: int | None = None,
 ):
     return _fa3_flash_attention_forward_impl(
         query,
@@ -550,6 +558,7 @@ def _fa3_flash_attention_forward_impl_default(
         out=out,
         block_table=block_table,
         num_splits=num_splits,
+        seqlen_k_per_split=seqlen_k_per_split,
     )
 
 

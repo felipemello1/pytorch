@@ -51,11 +51,13 @@ inductor_fallback_ops: dict[str, dict[str, str | dict[str, list[str] | str]]] = 
         "v2": {
             "new_args": ["block_table", "num_splits"],
             "since": "TORCH_VERSION_2_12_0",
-        }
+        },
+        "v3": {"new_args": ["seqlen_k_per_split"], "since": "TORCH_VERSION_2_15_0"},
     },
     "aten._flash_attention_forward_no_dropout_inplace.default": {
         "since": "TORCH_VERSION_2_12_0",
         "v2": {"new_args": ["num_splits"], "since": "TORCH_VERSION_2_12_0"},
+        "v3": {"new_args": ["seqlen_k_per_split"], "since": "TORCH_VERSION_2_15_0"},
     },
     "aten._flash_attention_forward.quantized": {"since": "TORCH_VERSION_2_11_0"},
     "aten._fused_moving_avg_obs_fq_helper_functional.default": {},

@@ -1502,8 +1502,12 @@ _flash_attention_forward(
     const std::optional<Tensor>& _seqused_k,
     const std::optional<Tensor>& _alibi_slopes,
     const std::optional<Tensor>& _block_table,
-    std::optional<int64_t> num_splits
+    std::optional<int64_t> num_splits,
+    std::optional<int64_t> seqlen_k_per_split
     ) {
+  TORCH_CHECK(
+      !seqlen_k_per_split.has_value(),
+      "seqlen_k_per_split requires FA4. Activate it with activate_flash_attention_impl(\"FA4\").");
   return _flash_attention_forward_impl(
       query, key, value,
       cumulative_sequence_length_q, cumulative_sequence_length_k,
@@ -1533,9 +1537,13 @@ _flash_attention_forward_no_dropout_inplace(
     const std::optional<Tensor>& _seqused_k,
     const std::optional<Tensor>& _alibi_slopes,
     const std::optional<Tensor>& _block_table,
-    std::optional<int64_t> num_splits
+    std::optional<int64_t> num_splits,
+    std::optional<int64_t> seqlen_k_per_split
     ) {
   TORCH_CHECK(dropout_p == 0.0);
+  TORCH_CHECK(
+      !seqlen_k_per_split.has_value(),
+      "seqlen_k_per_split requires FA4. Activate it with activate_flash_attention_impl(\"FA4\").");
   auto [output, logsumexp, philox_seed, philox_offset, debug_attn_mask] =
       _flash_attention_forward_impl(
           query, key, value,

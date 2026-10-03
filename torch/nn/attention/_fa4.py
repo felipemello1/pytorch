@@ -127,6 +127,7 @@ def _fa4_forward_support_error(
     cum_seq_q: torch.Tensor | None,
     block_table: torch.Tensor | None = None,
     num_splits: int | None = None,
+    seqlen_k_per_split: int | None = None,
 ) -> str | None:
     if dropout_p != 0.0:
         return "dropout_p must be 0"
@@ -144,6 +145,8 @@ def _fa4_forward_support_error(
         return f"paged KV (block_table) not supported on SM {major}0"
     if num_splits is not None and num_splits > 1 and major != 10:
         return f"SplitKV (num_splits > 1) not supported on SM {major}0"
+    if seqlen_k_per_split is not None and (num_splits is None or num_splits < 2):
+        return "seqlen_k_per_split requires num_splits >= 2"
     error = _fa4_common_support_error(
         query,
         (query, key, value),
@@ -207,6 +210,7 @@ def _fa4_run_forward(
     out: torch.Tensor | None = None,
     block_table: torch.Tensor | None = None,
     num_splits: int | None = None,
+    seqlen_k_per_split: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if _FA4_MODULE_PATH is None:
         raise RuntimeError("FA4 not registered")
@@ -231,6 +235,7 @@ def _fa4_run_forward(
         "seqused_k": seqused_k.contiguous() if seqused_k is not None else None,
         "page_table": block_table,
         "num_splits": num_splits,
+        "seqlen_k_per_split": seqlen_k_per_split,
         "out": out,
     }
     out, lse, *_ = module._flash_attn_fwd(query, key, value, **kwargs)
@@ -294,6 +299,7 @@ def _fa4_flash_attention_forward_impl(
     block_table: torch.Tensor | None = None,
     compute_auxiliary: bool = True,
     num_splits: int | None = None,
+    seqlen_k_per_split: int | None = None,
 ):
     error = _fa4_forward_support_error(
         query,
@@ -306,6 +312,7 @@ def _fa4_flash_attention_forward_impl(
         cum_seq_q,
         block_table,
         num_splits,
+        seqlen_k_per_split,
     )
     if error is not None:
         raise RuntimeError(f"FA4 flash_attention forward unsupported: {error}")
@@ -325,6 +332,7 @@ def _fa4_flash_attention_forward_impl(
         out,
         block_table,
         num_splits,
+        seqlen_k_per_split,
     )
     if compute_auxiliary:
         rng_state = torch.zeros((2,), dtype=torch.uint64, device=query.device)
@@ -357,6 +365,7 @@ def _fa4_flash_attention_forward_no_dropout_inplace_impl(
     alibi_slopes: torch.Tensor | None = None,
     block_table: torch.Tensor | None = None,
     num_splits: int | None = None,
+    seqlen_k_per_split: int | None = None,
 ):
     _, lse, _, _, _ = _fa4_flash_attention_forward_impl(
         query,
@@ -378,6 +387,7 @@ def _fa4_flash_attention_forward_no_dropout_inplace_impl(
         block_table=block_table,
         compute_auxiliary=False,
         num_splits=num_splits,
+        seqlen_k_per_split=seqlen_k_per_split,
     )
     return lse
 
