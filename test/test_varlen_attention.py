@@ -2166,6 +2166,81 @@ class TestVarlenAttention(NNTestCase):
         self.assertEqual(lse_out, lse)
 
     @skipIfRocm
+    @parametrize("is_causal", [False, True])
+    def test_cudnn_paged_decode(self, device, is_causal):
+        """cuDNN paged decode with one query per sequence returns every head's LSE."""
+        _check_cudnn_varlen_supported(device)
+        if (torch.backends.cudnn.version() or 0) < 92400:
+            self.skipTest("cuDNN >= 9.24 is required for max_q <= 128")
+        device_index = torch.device(device).index
+        if device_index is None:
+            device_index = torch.cuda.current_device()
+        if varlen_attention._cudnn_decode_disabled(device_index):
+            self.skipTest("cuDNN decode is disabled on this device")
+
+        torch.manual_seed(42)
+        # Covers a multi-page KV, a single key and an empty KV sequence.
+        kv_lens = [300, 1, 0, 129]
+        batch_size, page_size, head_dim = len(kv_lens), 64, 128
+        num_heads_q, num_heads_k = 16, 4
+        pages_per_seq = math.ceil(max(kv_lens) / page_size)
+        total_pages = batch_size * pages_per_seq
+        dtype = torch.bfloat16
+
+        q = torch.randn(batch_size, num_heads_q, head_dim, device=device, dtype=dtype)
+        cu_seq_q = torch.arange(batch_size + 1, device=device, dtype=torch.int32)
+        k_cache = torch.randn(
+            total_pages, page_size, num_heads_k, head_dim, device=device, dtype=dtype
+        )
+        v_cache = torch.randn_like(k_cache)
+        block_table = torch.randperm(
+            total_pages, device=device, dtype=torch.int32
+        ).view(batch_size, pages_per_seq)
+        seqused_k = torch.tensor(kv_lens, device=device, dtype=torch.int32)
+
+        cudnn_forward = patch.object(
+            torch.ops.aten,
+            "_cudnn_attention_forward",
+            wraps=torch.ops.aten._cudnn_attention_forward,
+        )
+        with (
+            _use_cudnn_varlen(True, device),
+            cudnn_forward as spy,
+            torch.no_grad(),
+        ):
+            output, lse = varlen_attn(
+                q,
+                k_cache,
+                v_cache,
+                cu_seq_q,
+                None,
+                1,
+                pages_per_seq * page_size,
+                return_aux=AuxRequest(lse=True),
+                window_size=(-1, 0) if is_causal else (-1, -1),
+                enable_gqa=True,
+                seqused_k=seqused_k,
+                block_table=block_table,
+            )
+        self.assertEqual(spy.call_count, 1, "expected the cuDNN backend to be used")
+
+        # With one query per sequence, the causal mask keeps every key.
+        scale = 1.0 / math.sqrt(head_dim)
+        repeats = num_heads_q // num_heads_k
+        k_logical = gather_paged_cache(k_cache, block_table)
+        v_logical = gather_paged_cache(v_cache, block_table)
+        expected = torch.empty_like(q, dtype=torch.float32)
+        expected_lse = torch.empty_like(lse)
+        for i, kv_len in enumerate(kv_lens):
+            k_i = k_logical[i, :kv_len].float().repeat_interleave(repeats, dim=1)
+            v_i = v_logical[i, :kv_len].float().repeat_interleave(repeats, dim=1)
+            scores = torch.einsum("hd,khd->hk", q[i].float(), k_i) * scale
+            expected[i] = torch.einsum("hk,khd->hd", scores.softmax(-1), v_i)
+            expected_lse[:, i] = scores.logsumexp(-1)
+        self.assertEqual(output.float(), expected, atol=2e-2, rtol=2e-2)
+        self.assertEqual(lse, expected_lse, atol=2e-2, rtol=2e-2)
+
+    @skipIfRocm
     def test_cudnn_non_power_of_two_page_rejected(self, device):
         """Callers must expose paged KV to cuDNN with power-of-two pages."""
         _check_cudnn_varlen_supported(device)
