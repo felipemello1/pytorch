@@ -1105,6 +1105,20 @@ class TestMatmulCuda(InductorTestCase):
             C = f(A, B, offs)
         self.assertEqual(C, C_ref)
 
+    @unittest.skipIf(not SM90OrLater, "Grouped gemm supported on SM90")
+    def test_grouped_gemm_2d_3d_few_rows_per_group(self):
+        # 0-2 rows per group, as MoE experts get at decode, including an empty
+        # group. On SM100 the CUTLASS kernel swaps A and B for this case.
+        device = "cuda"
+        dtype = torch.bfloat16
+        offs = torch.tensor([1, 3, 3, 4, 6], device=device, dtype=torch.int32)
+        A = torch.randn(6, 256, device=device, dtype=dtype)
+        weight = torch.randn(5, 1024, 256, device=device, dtype=dtype)
+        # B column-major (as in x @ weight.T) and row-major
+        for B in (weight.transpose(-2, -1), weight.transpose(-2, -1).contiguous()):
+            C = torch._grouped_mm(A, B, offs=offs)
+            self.assertEqual(C, self.grouped_gemm_reference(A, B, offs))
+
     def test_grouped_gemm_doubly_non_contiguous(self):
         # Verify that doubly-non-contiguous inputs (neither stride is 1)
         # are rejected by _grouped_mm_validate_inputs.
