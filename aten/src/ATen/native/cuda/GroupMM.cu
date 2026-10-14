@@ -88,7 +88,8 @@ template <
     bool PONGOr2SM,
     typename TB_M,
     typename TB_N,
-    typename TB_K>
+    typename TB_K,
+    bool SwapAB = false>
 void bf16bf16_grouped_gemm_impl_sm90_sm100(
     at::Tensor mat_a, // bf16
     at::Tensor mat_b, // bf16
@@ -99,18 +100,22 @@ void bf16bf16_grouped_gemm_impl_sm90_sm100(
   using DtypeB = cutlass::bfloat16_t;
   using DtypeOutput = cutlass::bfloat16_t;
   using DtypeAccum = float;
+  // SwapAB runs out^T = B^T @ A^T: see prepare_grouped_gemm_data.
   using LayoutA = cute::conditional_t<
-      a_row_major,
+      SwapAB ? !b_row_major : a_row_major,
       cutlass::layout::RowMajor,
       cutlass::layout::ColumnMajor>;
   constexpr int AlignmentA = 16 / sizeof(DtypeA);
 
   using LayoutB = cute::conditional_t<
-      b_row_major,
+      SwapAB ? !a_row_major : b_row_major,
       cutlass::layout::RowMajor,
       cutlass::layout::ColumnMajor>;
   constexpr int AlignmentB = 16 / sizeof(DtypeB);
-  using LayoutOutput = cutlass::layout::RowMajor;
+  using LayoutOutput = cute::conditional_t<
+      SwapAB,
+      cutlass::layout::ColumnMajor,
+      cutlass::layout::RowMajor>;
   constexpr int AlignmentOutput = 16 / sizeof(DtypeOutput);
   using OperatorClass = cutlass::arch::OpClassTensorOp;
   using TileShape = cute::Shape<TB_M, TB_N, TB_K>;
@@ -270,7 +275,8 @@ void bf16bf16_grouped_gemm_impl_sm90_sm100(
       0,
       0,
       a_row_major,
-      b_row_major);
+      b_row_major,
+      SwapAB);
 
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
@@ -348,6 +354,36 @@ void dispatch_bf16_grouped_kernel_on_tile_size(
   const bool sm11x = properties != nullptr && properties->major == 11;
 
   if (sm10x || sm11x) {
+    // 2D x 3D with few rows per group (e.g. MoE experts at decode): the
+    // 128-row tiles below would be mostly empty, so swap A and B. M is the
+    // average rows per group; thresholds of 3/4 of the 32/128-column tile
+    // leave room for groups above the average, which would need a 2nd tile.
+    if constexpr (a_row_major) {
+      if (mat_a.dim() == 2 && mat_b.dim() == 3 && M <= 96) {
+        if (M <= 24) {
+          bf16bf16_grouped_gemm_impl_sm90_sm100<
+              cutlass::arch::Sm100,
+              a_row_major,
+              b_row_major,
+              /*PONGOr2SM*/ true,
+              cute::_256,
+              cute::_32,
+              cute::_128,
+              /*SwapAB*/ true>(mat_a, mat_b, offs, bias, out);
+        } else {
+          bf16bf16_grouped_gemm_impl_sm90_sm100<
+              cutlass::arch::Sm100,
+              a_row_major,
+              b_row_major,
+              /*PONGOr2SM*/ true,
+              cute::_256,
+              cute::_128,
+              cute::_64,
+              /*SwapAB*/ true>(mat_a, mat_b, offs, bias, out);
+        }
+        return;
+      }
+    }
     if (small){
       bf16bf16_grouped_gemm_impl_sm90_sm100<
         cutlass::arch::Sm100,

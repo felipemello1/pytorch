@@ -43,7 +43,8 @@ __global__ void prepare_grouped_gemm_data(
     int64_t a_scale_stride,
     int64_t b_scale_stride,
     bool a_row_major = true,
-    bool b_row_major = false) {
+    bool b_row_major = false,
+    bool swap_ab = false) {
   int32_t tid = threadIdx.x;
   int32_t delta = 0;
   int32_t offset = 0;
@@ -137,6 +138,21 @@ __global__ void prepare_grouped_gemm_data(
       inputA_scale_ptrs[tid] = scale_A + tid * a_scale_stride;
       inputB_scale_ptrs[tid] = scale_B + tid * b_scale_stride;
     }
+  }
+  if (swap_ab) {
+    // Swap A and B: out_g^T (N, M) = B_g^T (N, K) @ A_g^T (K, M).
+    // With few rows per group (e.g. MoE experts at decode), B's N rows then
+    // fill the tile's long side and A's few rows go to its short side.
+    // Only pointers, shapes and strides change; out^T is column-major.
+    DtypeA* a_ptr = A_ptrs[tid];
+    A_ptrs[tid] = reinterpret_cast<DtypeA*>(B_ptrs[tid]);
+    B_ptrs[tid] = reinterpret_cast<DtypeB*>(a_ptr);
+    problem_sizes[tid] = ProblemShape(N, M, K);
+    stride_A[tid] = cutlass::make_cute_packed_stride(StrideA{}, {ldb, ldb, 1});
+    stride_B[tid] = cutlass::make_cute_packed_stride(StrideB{}, {lda, lda, 1});
+    stride_output[tid] = cutlass::make_cute_packed_stride(
+        StrideOutput{}, {ldoutput, ldoutput, 1});
+    return;
   }
   problem_sizes[tid] = ProblemShape(M, N, K);
 
