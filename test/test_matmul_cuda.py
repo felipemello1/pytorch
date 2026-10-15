@@ -1119,6 +1119,32 @@ class TestMatmulCuda(InductorTestCase):
             C = torch._grouped_mm(A, B, offs=offs)
             self.assertEqual(C, self.grouped_gemm_reference(A, B, offs))
 
+    @unittest.skipIf(not SM90OrLater, "Grouped gemm supported on SM90")
+    def test_grouped_gemm_offs_from_previous_kernel_in_cuda_graph(self):
+        # The kernel right before _grouped_mm writes offs, inside a CUDA graph. On
+        # SM100 _grouped_mm is launched with programmatic dependent launch: it may
+        # start before that kernel ends, and must still read the new offs.
+        device = "cuda"
+        dtype = torch.bfloat16
+        counts = torch.zeros(8, device=device, dtype=torch.int32)
+        A = torch.randn(64, 256, device=device, dtype=dtype)
+        B = torch.randn(8, 512, 256, device=device, dtype=dtype).transpose(-2, -1)
+
+        def f():
+            offs = torch.cumsum(counts, 0, dtype=torch.int32)
+            return torch._grouped_mm(A, B, offs=offs), offs
+
+        f()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            C, offs = f()
+        for seed in range(4):
+            torch.manual_seed(seed)
+            counts.copy_(torch.randint(0, 9, (8,), device=device, dtype=torch.int32))
+            graph.replay()
+            rows = int(offs[-1])
+            self.assertEqual(C[:rows], self.grouped_gemm_reference(A, B, offs))
+
     def test_grouped_gemm_doubly_non_contiguous(self):
         # Verify that doubly-non-contiguous inputs (neither stride is 1)
         # are rejected by _grouped_mm_validate_inputs.

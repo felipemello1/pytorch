@@ -23,6 +23,12 @@ C10_DIAGNOSTIC_PUSH_AND_IGNORED_IF_DEFINED("-Wunused-but-set-variable")
 
 #if defined(BUILD_GG_KERNEL)
 
+// Compile the sm100 kernels with grid dependency control, so they can be
+// launched with programmatic dependent launch (PDL): a kernel starts its
+// prologue while the previous one finishes, then waits before reading global
+// memory.
+#define CUTLASS_ENABLE_GDC_FOR_SM100 1
+
 #include <cute/tensor.hpp>
 #include <cutlass/core_io.h>
 #include <cutlass/cutlass.h>
@@ -248,7 +254,26 @@ void bf16bf16_grouped_gemm_impl_sm90_sm100(
   Strides tensor_ShapeA = make_strides(mat_a.sizes());
   Strides tensor_ShapeB = make_strides(mat_b.sizes());
 
-  at::cuda::detail::prepare_grouped_gemm_data<<<1, group_count, 0, stream>>>(
+  // On sm100, launch the setup kernel and the GEMM with PDL: the setup kernel
+  // lets the GEMM start its prologue at once, and each waits for its producer
+  // before reading global memory.
+  constexpr bool use_pdl = std::is_same_v<ArchTag, cutlass::arch::Sm100>;
+  cudaLaunchAttribute pdl_attribute;
+  pdl_attribute.id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  pdl_attribute.val.programmaticStreamSerializationAllowed = 1;
+  cudaLaunchConfig_t setup_config = {
+      dim3(1), dim3(group_count), 0, stream, &pdl_attribute, use_pdl ? 1u : 0u};
+  C10_CUDA_CHECK(cudaLaunchKernelEx(
+      &setup_config,
+      at::cuda::detail::prepare_grouped_gemm_data<
+          DtypeA,
+          DtypeB,
+          DtypeOutput,
+          float,
+          typename ProblemShape::UnderlyingProblemShape,
+          StrideA,
+          StrideB,
+          StrideOutput>,
       reinterpret_cast<DtypeA*>(mat_a.data_ptr()),
       reinterpret_cast<DtypeB*>(mat_b.data_ptr()),
       reinterpret_cast<DtypeOutput*>(out.data_ptr()),
@@ -276,9 +301,7 @@ void bf16bf16_grouped_gemm_impl_sm90_sm100(
       0,
       a_row_major,
       b_row_major,
-      SwapAB);
-
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+      SwapAB));
 
   typename Gemm::Arguments arguments{
       cutlass::gemm::GemmUniversalMode::kGrouped,
@@ -312,7 +335,8 @@ void bf16bf16_grouped_gemm_impl_sm90_sm100(
   TORCH_CHECK(
       gemm.initialize(arguments, workspace.get()) == cutlass::Status::kSuccess,
       "cutlass cannot initialize");
-  auto status = gemm(at::cuda::getCurrentCUDAStream());
+  auto status =
+      gemm(stream, /*cuda_adapter=*/nullptr, /*launch_with_pdl=*/use_pdl);
   TORCH_CHECK(
       status == cutlass::Status::kSuccess,
       "cutlass cannot run, error ",

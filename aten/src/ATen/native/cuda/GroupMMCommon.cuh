@@ -1,4 +1,5 @@
 #pragma once
+#include <cutlass/arch/grid_dependency_control.h>
 #include <cutlass/util/packed_stride.hpp>
 
 namespace at::cuda::detail {
@@ -45,6 +46,10 @@ __global__ void prepare_grouped_gemm_data(
     bool a_row_major = true,
     bool b_row_major = false,
     bool swap_ab = false) {
+  // No-ops unless compiled with grid dependency control and launched with PDL:
+  // let the grouped GEMM launch now, then wait for the kernel that wrote offs.
+  cutlass::arch::launch_dependent_grids();
+  cutlass::arch::wait_on_dependent_grids();
   int32_t tid = threadIdx.x;
   int32_t delta = 0;
   int32_t offset = 0;
