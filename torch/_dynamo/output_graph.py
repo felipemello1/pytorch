@@ -3120,6 +3120,15 @@ class OutputGraph(OutputGraphCommon):
                 specialization_guards = []
                 specialization_cache: dict[Specialization, Callable[[Any], Any]] = {}
                 sources = [a.source for a in self.graphargs]
+                # A specialization can compile on a later call, from tensors Dynamo never
+                # fakified. Without their symbolic contexts, AOTAutograd would make every
+                # dim dynamic, including the dims that are static in this graph.
+                symbolic_contexts = [
+                    self.tracing_context.tensor_to_context.get(a.example)
+                    if isinstance(a.example, torch.Tensor)
+                    else None
+                    for a in self.graphargs
+                ]
                 for specialization in specializations:
                     source_index = sources.index(specialization.source)
                     check_fn_source = inspect.getsource(specialization.check_fn).strip()
@@ -3164,6 +3173,11 @@ class OutputGraph(OutputGraphCommon):
                                 # Modify gm so AOTAutogradCache key changes per specialization
                                 gm.meta["specialization"] = specialization
                                 example_inputs: list[Tensor] = list(args)
+                                for arg, context in zip(args, symbolic_contexts):
+                                    if context is not None:
+                                        self.tracing_context.tensor_to_context[arg] = (
+                                            context
+                                        )
                                 with tracing(self.tracing_context):
                                     specialization_cache[specialization] = (
                                         self.call_user_compiler(gm, example_inputs)
