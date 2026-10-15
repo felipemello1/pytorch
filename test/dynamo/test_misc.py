@@ -12079,6 +12079,38 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
         # Dim 1 is static in the traced graph, so it stays an int.
         self.assertIs(type(compiled_shapes[1][0][1]), int)
 
+    def test_specialize_on_compiles_with_the_selecting_size_as_hint(self):
+        from torch._dynamo.backends.common import aot_autograd
+        from torch._functorch.aot_autograd import make_boxed_func
+
+        hints = []
+        hint_overrides = []
+
+        def fw_compiler(gm, example_inputs):
+            (x,) = (t for t in example_inputs if isinstance(t, torch.Tensor))
+            rows = x.shape[0].node
+            hints.append(int(rows.shape_env.backed_var_to_val[rows.expr]))
+            # The FX graph cache keys on hint overrides, so this keeps the two graphs apart.
+            hint_overrides.append(rows.shape_env.var_to_hint_override.get(rows.expr))
+            return make_boxed_func(gm.forward)
+
+        def fn(x):
+            return x.cos()
+
+        opt_fn = torch.compile(fn, backend=aot_autograd(fw_compiler=fw_compiler))
+
+        def make_input(rows):
+            x = torch.randn(rows, 3)
+            torch._dynamo.mark_dynamic(x, 0, specialize_on=[lambda s: s > 16])
+            return x
+
+        opt_fn(make_input(4))
+        x = make_input(32)
+        self.assertEqual(opt_fn(x), fn(x))
+        # The generic graph is hinted with 4, the `s > 16` graph with the 32 that selected it.
+        self.assertEqual(hints, [4, 32])
+        self.assertEqual(hint_overrides, [None, 32])
+
     def test_maybe_mark_dynamic_range_with_propagated_dynamic_dim(self):
         def fn(x):
             return x.cos() * x.shape[0] * x.shape[1]
