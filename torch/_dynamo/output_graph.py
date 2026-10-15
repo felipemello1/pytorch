@@ -3178,20 +3178,26 @@ class OutputGraph(OutputGraphCommon):
                                 source_index,
                             ),
                             specialization,
+                            source_index,
                         )
                     )
 
                 @torch._dynamo.disable(reason="do not trace Dynamo-compiled graph")  # type: ignore[misc]
                 def specialized_dispatch(*args: Any, **kwargs: Any) -> Any:
-                    for check_fn, specialization in specialization_guards:
+                    for check_fn, specialization, source_index in specialization_guards:
                         if check_fn(args):
                             if specialization in specialization_cache:
                                 return specialization_cache[specialization](
                                     *args, **kwargs
                                 )
 
+                            # Hint with the size that selected the specialization, so a
+                            # range like `s > N` is not compiled and tuned for the generic
+                            # graph's size.
                             with self.shape_env.patch_source_specialization(
-                                specialization.source, specialization.check_fn
+                                specialization.source,
+                                specialization.check_fn,
+                                hint=args[source_index],
                             ):
                                 # Modify gm so AOTAutogradCache key changes per specialization
                                 gm.meta["specialization"] = specialization
