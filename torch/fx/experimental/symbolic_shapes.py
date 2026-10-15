@@ -4371,7 +4371,10 @@ class ShapeEnv:
 
     @contextmanager
     def patch_source_specialization(
-        self, source: Source, check_fn: Callable[[sympy.Symbol], sympy.Expr]
+        self,
+        source: Source,
+        check_fn: Callable[[sympy.Symbol], sympy.Expr],
+        hint: int | None = None,
     ) -> Generator[None, None, None]:
         """
         Temporarily add symbol-level axioms to the ShapeEnv. This is useful when you want to "fork"
@@ -4385,9 +4388,18 @@ class ShapeEnv:
             source: The source of the symbol to specialize
             check_fn: A function that takes a sympy Symbol and returns a sympy expression
                      representing a constraint/specialization to be applied
+            hint: The size hint for the symbol while patched, e.g. the runtime size that
+                  satisfied ``check_fn``. Defaults to the hint the symbol was created with.
         """
         name = source.name
         sym = self.source_to_var[name]
+        original_hint = self.backed_var_to_val[sym]
+        original_override = self.var_to_hint_override.get(sym)
+        if hint is not None:
+            self.backed_var_to_val[sym] = sympy.Integer(hint)
+            # The FX graph cache keys on hint overrides, not hints: without this, the
+            # generic graph's compiled kernels would be served back.
+            self.var_to_hint_override[sym] = hint
         expr = check_fn(SymInt(SymNode(sym, self, int, None))).node._expr
         new_axioms = dict(self.get_implications(self.simplify(expr)))
         added_replacements = {}
@@ -4413,6 +4425,11 @@ class ShapeEnv:
                 self.axioms.pop(k, None)
             for k in added_replacements:
                 self.replacements.pop(k, None)
+            self.backed_var_to_val[sym] = original_hint
+            if original_override is None:
+                self.var_to_hint_override.pop(sym, None)
+            else:
+                self.var_to_hint_override[sym] = original_override
             self.frozen = False
 
     def check_equal(self, other: ShapeEnv) -> None:
