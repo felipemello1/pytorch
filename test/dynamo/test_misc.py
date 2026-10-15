@@ -12049,6 +12049,36 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
         self.assertEqual(opt_fn(x), fn(x))
         self.assertEqual(compiled_ranges, [(2, 5), (3, int_oo)])
 
+    def test_specialize_on_later_call_keeps_static_dims(self):
+        from torch._dynamo.backends.common import aot_autograd
+        from torch._functorch.aot_autograd import make_boxed_func
+
+        compiled_shapes = []
+
+        def fw_compiler(gm, example_inputs):
+            compiled_shapes.append(
+                [x.shape for x in example_inputs if isinstance(x, torch.Tensor)]
+            )
+            return make_boxed_func(gm.forward)
+
+        def fn(x):
+            return x.cos()
+
+        opt_fn = torch.compile(fn, backend=aot_autograd(fw_compiler=fw_compiler))
+
+        def make_input(rows):
+            x = torch.randn(rows, 3)
+            torch._dynamo.mark_dynamic(x, 0, specialize_on=[lambda s: s > 16])
+            return x
+
+        opt_fn(make_input(4))
+        # The specialization compiles on this later call, from tensors Dynamo never saw.
+        x = make_input(32)
+        self.assertEqual(opt_fn(x), fn(x))
+        self.assertEqual(len(compiled_shapes), 2)
+        # Dim 1 is static in the traced graph, so it stays an int.
+        self.assertIs(type(compiled_shapes[1][0][1]), int)
+
     def test_maybe_mark_dynamic_range_with_propagated_dynamic_dim(self):
         def fn(x):
             return x.cos() * x.shape[0] * x.shape[1]
