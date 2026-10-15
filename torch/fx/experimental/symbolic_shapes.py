@@ -4387,7 +4387,8 @@ class ShapeEnv:
                      representing a constraint/specialization to be applied
         """
         name = source.name
-        sym = self.source_to_var[name]
+        # The symbol a guard replaced this source's symbol with, if any.
+        sym = self.replace(self.source_to_var[name])
         expr = check_fn(SymInt(SymNode(sym, self, int, None))).node._expr
         new_axioms = dict(self.get_implications(self.simplify(expr)))
         added_replacements = {}

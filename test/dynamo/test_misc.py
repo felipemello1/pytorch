@@ -12049,6 +12049,56 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
         self.assertEqual(opt_fn(x), fn(x))
         self.assertEqual(compiled_ranges, [(2, 5), (3, int_oo)])
 
+    def test_specialize_on_size_shared_with_another_input(self):
+        def fn(gate, x):
+            return torch.sigmoid(gate) * x
+
+        def make_inputs(rows):
+            gate, x = torch.randn(rows, 1), torch.randn(rows, 3)
+            torch._dynamo.mark_dynamic(x, 0, specialize_on=[lambda s: s > 16])
+            return gate, x
+
+        # The product unifies the two sizes, so only gate's size is a graph input.
+        counter = torch._dynamo.testing.CompileCounterWithBackend("aot_eager")
+        opt_fn = torch.compile(fn, backend=counter, dynamic=True)
+        for rows in (8, 32):
+            gate, x = make_inputs(rows)
+            self.assertEqual(opt_fn(gate, x), fn(gate, x))
+        # The generic graph and the `s > 16` graph.
+        self.assertEqual(counter.frame_count, 2)
+
+        # Here the guard replaces x's symbol with scores' instead.
+        def scale(scores, x):
+            return x * scores.sum(-1, keepdim=True)
+
+        torch._dynamo.reset()
+        counter = torch._dynamo.testing.CompileCounterWithBackend("aot_eager")
+        opt_scale = torch.compile(scale, backend=counter)
+        for rows in (8, 32):
+            gate, x = make_inputs(rows)
+            scores = torch.randn(rows, 4)
+            torch._dynamo.maybe_mark_dynamic(scores, 0)
+            self.assertEqual(opt_scale(scores, x), scale(scores, x))
+        self.assertEqual(counter.frame_count, 2)
+
+        # With gate static, the product specializes the marked dim.
+        torch._dynamo.reset()
+        opt_fn = torch.compile(fn, backend="aot_eager")
+        gate, x = make_inputs(8)
+        with self.assertRaises(torch.fx.experimental.symbolic_shapes.ConstraintViolationError):
+            opt_fn(gate, x)
+
+        # An unbacked size has no backed symbol: only the generic graph runs.
+        def cos(x):
+            return x.cos()
+
+        torch._dynamo.reset()
+        opt_cos = torch.compile(cos, backend="aot_eager")
+        for rows in (8, 32):
+            x = torch.randn(rows, 3)
+            torch._dynamo.mark_unbacked(x, 0, specialize_on=[lambda s: s > 16])
+            self.assertEqual(opt_cos(x), cos(x))
+
     def test_maybe_mark_dynamic_range_with_propagated_dynamic_dim(self):
         def fn(x):
             return x.cos() * x.shape[0] * x.shape[1]
