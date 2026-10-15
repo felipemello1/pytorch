@@ -4392,7 +4392,8 @@ class ShapeEnv:
                   satisfied ``check_fn``. Defaults to the hint the symbol was created with.
         """
         name = source.name
-        sym = self.source_to_var[name]
+        # The symbol a guard replaced this source's symbol with, if any.
+        sym = self.replace(self.source_to_var[name])
         original_hint = self.backed_var_to_val[sym]
         original_override = self.var_to_hint_override.get(sym)
         if hint is not None:

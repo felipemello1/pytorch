@@ -3119,7 +3119,6 @@ class OutputGraph(OutputGraphCommon):
             if specializations := old_fake_mode.shape_env.specializations:
                 specialization_guards = []
                 specialization_cache: dict[Specialization, Callable[[Any], Any]] = {}
-                sources = [a.source for a in self.graphargs]
                 # A specialization can compile on a later call, from tensors Dynamo never
                 # fakified. Without their symbolic contexts, AOTAutograd would make every
                 # dim dynamic, including the dims that are static in this graph.
@@ -3130,7 +3129,26 @@ class OutputGraph(OutputGraphCommon):
                     for a in self.graphargs
                 ]
                 for specialization in specializations:
-                    source_index = sources.index(specialization.source)
+                    # Match the graph input by symbol, not by source. When a guard merges
+                    # two sizes (`sigmoid(gate) * x`), one of them replaces the other, and
+                    # the merged size is lifted once, under either input's source.
+                    shape_env = old_fake_mode.shape_env
+                    symbol = shape_env.replace(
+                        shape_env.source_to_var[specialization.source.name]
+                    )
+                    source_index = next(
+                        (
+                            i
+                            for i, arg in enumerate(self.graphargs)
+                            if isinstance(arg.example, torch.SymInt)
+                            and shape_env.replace(arg.example.node.expr) == symbol
+                        ),
+                        None,
+                    )
+                    if source_index is None:
+                        # A guard specialized the dim to a constant: nothing to dispatch
+                        # on. Guard creation reports it as a constraint violation.
+                        continue
                     check_fn_source = inspect.getsource(specialization.check_fn).strip()
                     # Required because the LABDA_GUARD API requires a root guard manager
                     unused_root_guard_manager = RootGuardManager()
