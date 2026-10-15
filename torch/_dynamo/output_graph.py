@@ -3119,6 +3119,15 @@ class OutputGraph(OutputGraphCommon):
             if specializations := old_fake_mode.shape_env.specializations:
                 specialization_guards = []
                 specialization_cache: dict[Specialization, Callable[[Any], Any]] = {}
+                # A specialization can compile on a later call, from tensors Dynamo never
+                # fakified. Without their symbolic contexts, AOTAutograd would make every
+                # dim dynamic, including the dims that are static in this graph.
+                symbolic_contexts = [
+                    self.tracing_context.tensor_to_context.get(a.example)
+                    if isinstance(a.example, torch.Tensor)
+                    else None
+                    for a in self.graphargs
+                ]
                 for specialization in specializations:
                     # Match the graph input by symbol, not by source. When a guard merges
                     # two sizes (`sigmoid(gate) * x`), one of them replaces the other, and
@@ -3187,10 +3196,25 @@ class OutputGraph(OutputGraphCommon):
                                 # Modify gm so AOTAutogradCache key changes per specialization
                                 gm.meta["specialization"] = specialization
                                 example_inputs: list[Tensor] = list(args)
-                                with tracing(self.tracing_context):
-                                    specialization_cache[specialization] = (
-                                        self.call_user_compiler(gm, example_inputs)
-                                    )
+                                for arg, context in zip(args, symbolic_contexts):
+                                    if context is not None:
+                                        self.tracing_context.tensor_to_context[arg] = (
+                                            context
+                                        )
+                                try:
+                                    with tracing(self.tracing_context):
+                                        specialization_cache[specialization] = (
+                                            self.call_user_compiler(gm, example_inputs)
+                                        )
+                                finally:
+                                    # Unmap this call's tensors, as the end of a Dynamo
+                                    # compile does: a weak ref left in this map makes
+                                    # torch.utils.swap_tensors raise on them.
+                                    for arg, context in zip(args, symbolic_contexts):
+                                        if context is not None:
+                                            self.tracing_context.tensor_to_context.pop(
+                                                arg, None
+                                            )
 
                             return specialization_cache[specialization](*args, **kwargs)
                     return compiled_fn(*args, **kwargs)
