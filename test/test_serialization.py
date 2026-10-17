@@ -7,6 +7,7 @@ import functools
 import gc
 import gzip
 import io
+import itertools
 import linecache
 import os
 import pathlib
@@ -1070,6 +1071,29 @@ class TestOldSerialization(TestCase, SerializationMixin):
 
 
 class TestSerialization(TestCase, SerializationMixin):
+    def test_load_creates_no_class_per_call(self):
+        # torch.load used to define its Unpickler subclass inside the call: one new class (and its
+        # reference cycles, freed only by the cyclic GC) per load.
+        for use_zipfile, weights_only in itertools.product((False, True), (False, True)):
+            with self.subTest(use_zipfile=use_zipfile, weights_only=weights_only):
+                buf = io.BytesIO()
+                torch.save(
+                    torch.arange(4), buf, _use_new_zipfile_serialization=use_zipfile
+                )
+                data = buf.getvalue()
+                torch.load(io.BytesIO(data), weights_only=weights_only)
+                gc.collect()
+                classes_before = {id(o) for o in gc.get_objects() if isinstance(o, type)}
+                for _ in range(5):
+                    loaded = torch.load(io.BytesIO(data), weights_only=weights_only)
+                self.assertEqual(loaded.tolist(), [0, 1, 2, 3])
+                new_classes = [
+                    o
+                    for o in gc.get_objects()
+                    if isinstance(o, type) and id(o) not in classes_before
+                ]
+                self.assertEqual(new_classes, [])
+
     @parametrize("load_mode", ["default", "fake_tensor_mode", "map_location_meta"])
     def test_load_preserves_storage_sharing(self, load_mode):
         self._test_load_preserves_storage_sharing(load_mode)

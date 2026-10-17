@@ -1665,6 +1665,51 @@ _get_layout.cache = {}  # type: ignore[attr-defined]
 copyreg.pickle(torch.layout, lambda obj: (_get_layout, (str(obj),)))
 
 
+_LOAD_MODULE_MAPPING: dict[str, str] = {
+    # See https://github.com/pytorch/pytorch/pull/51633
+    "torch.tensor": "torch._tensor"
+}
+
+
+def _make_unpickler_wrapper(pickle_module: Any, remap_modules: bool) -> type:
+    # Need to subclass Unpickler instead of directly monkey-patching the find_class method
+    # because it's marked readonly in pickle.
+    # The type: ignore is because mypy can't statically determine the type of this class.
+    class UnpicklerWrapper(pickle_module.Unpickler):  # type: ignore[name-defined]
+        # from https://stackoverflow.com/questions/13398462/unpickling-python-objects-with-a-changed-module-path/13405732
+        # Lets us override the imports that pickle uses when unpickling an object.
+        # This is useful for maintaining BC if we change a module path that tensor instantiation relies on.
+        def find_class(self, mod_name, name):
+            if type(name) is str and "Storage" in name:
+                try:
+                    return StorageType(name)
+                except KeyError:
+                    pass
+            if remap_modules:
+                mod_name = _LOAD_MODULE_MAPPING.get(mod_name, mod_name)
+            return super().find_class(mod_name, name)
+
+    return UnpicklerWrapper
+
+
+_make_unpickler_wrapper_cached = functools.lru_cache(maxsize=None)(
+    _make_unpickler_wrapper
+)
+
+
+def _unpickler_wrapper(pickle_module: Any, *, remap_modules: bool) -> type:
+    """The Unpickler subclass `torch.load` uses for `pickle_module`, built once per module.
+
+    A class defined inside the load functions was a new class on every call: one class and its
+    reference cycles per load, which only the cyclic GC frees.
+    """
+    try:
+        hash(pickle_module)
+    except TypeError:  # an unhashable pickle_module can't key the cache
+        return _make_unpickler_wrapper(pickle_module, remap_modules)
+    return _make_unpickler_wrapper_cached(pickle_module, remap_modules)
+
+
 def _legacy_load(
     f,
     map_location,
@@ -1677,14 +1722,7 @@ def _legacy_load(
 
     restore_location = _get_restore_location(map_location)
 
-    class UnpicklerWrapper(pickle_module.Unpickler):  # type: ignore[name-defined]
-        def find_class(self, mod_name, name):
-            if type(name) is str and "Storage" in name:
-                try:
-                    return StorageType(name)
-                except KeyError:
-                    pass
-            return super().find_class(mod_name, name)
+    UnpicklerWrapper = _unpickler_wrapper(pickle_module, remap_modules=False)
 
     def _check_container_source(container_type, source_file, original_source):
         try:
@@ -2227,26 +2265,7 @@ def _load(
 
         return typed_storage
 
-    load_module_mapping: dict[str, str] = {
-        # See https://github.com/pytorch/pytorch/pull/51633
-        "torch.tensor": "torch._tensor"
-    }
-
-    # Need to subclass Unpickler instead of directly monkey-patching the find_class method
-    # because it's marked readonly in pickle.
-    # The type: ignore is because mypy can't statically determine the type of this class.
-    class UnpicklerWrapper(pickle_module.Unpickler):  # type: ignore[name-defined]
-        # from https://stackoverflow.com/questions/13398462/unpickling-python-objects-with-a-changed-module-path/13405732
-        # Lets us override the imports that pickle uses when unpickling an object.
-        # This is useful for maintaining BC if we change a module path that tensor instantiation relies on.
-        def find_class(self, mod_name, name):
-            if type(name) is str and "Storage" in name:
-                try:
-                    return StorageType(name)
-                except KeyError:
-                    pass
-            mod_name = load_module_mapping.get(mod_name, mod_name)
-            return super().find_class(mod_name, name)
+    UnpicklerWrapper = _unpickler_wrapper(pickle_module, remap_modules=True)
 
     # Load the data (which may in turn use `persistent_load` to load tensors)
     data_file = io.BytesIO(zip_file.get_record(pickle_file))
