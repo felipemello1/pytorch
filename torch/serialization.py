@@ -1704,9 +1704,10 @@ def _unpickler_wrapper(pickle_module: Any, *, remap_modules: bool) -> type:
     reference cycles per load, which only the cyclic GC frees.
     """
     try:
-        return _make_unpickler_wrapper_cached(pickle_module, remap_modules)
-    except TypeError:  # an unhashable pickle_module
+        hash(pickle_module)
+    except TypeError:  # an unhashable pickle_module can't key the cache
         return _make_unpickler_wrapper(pickle_module, remap_modules)
+    return _make_unpickler_wrapper_cached(pickle_module, remap_modules)
 
 
 def _legacy_load(
