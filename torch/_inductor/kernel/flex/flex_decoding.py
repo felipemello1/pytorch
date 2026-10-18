@@ -316,9 +316,8 @@ def create_flex_decoding_kernel(*args, **kwargs):
             # m
             # if V.graph.sizevars.evaluate_expr(sympy.Lt(query.get_size()[-2], 0))
             # else  # Always use a BLOCK_M > 16 before Triton fix https://github.com/triton-lang/triton/pull/4061 is in pin
-            # Cap at 128 folded rows (more M blocks instead): larger tiles run out of
-            # shared memory in fp32 and were never selected before GQA-folded rows
-            # were checked correctly against SPARSE_Q_BLOCK_SIZE.
+            # Cap at 128 folded rows (or GQA_SHARED_HEADS if larger) and use more M blocks:
+            # bigger tiles overflow shared memory in fp32 and run 5-8x slower in bf16.
             min(
                 max(
                     next_power_of_2(
