@@ -1494,6 +1494,32 @@ class GraphModule(torch.nn.Module):
         x = torch.zeros([])
         self._assert_wrap_fallback(f, (x,))
 
+    def test_side_effect_set_new_attr_outer_obj_in_checkpoint(self):
+        # Creating an attribute on an outer-scope object can't be undone before
+        # the HOP exits, so it's an unsafe side effect.
+        obj = Obj()
+
+        def f(x):
+            def g(x):
+                obj.val = 1
+                return x.sin()
+
+            return torch.utils.checkpoint.checkpoint(g, x, use_reentrant=False).cos()
+
+        x = torch.randn(4, requires_grad=True)
+        with self.assertRaisesRegex(
+            torch._dynamo.exc.Unsupported, "HOP: Unsafe side effect"
+        ):
+            torch.compile(f, backend="eager", fullgraph=True)(x)
+
+        # Without fullgraph, only the checkpoint call breaks the graph.
+        torch._dynamo.reset()
+        cnt = CompileCounter()
+        out = torch.compile(f, backend=cnt)(x)
+        self.assertEqual(out, x.sin().cos())
+        self.assertEqual(obj.val, 1)
+        self.assertGreaterEqual(cnt.frame_count, 1)
+
     def test_side_effect_set_existing_attr_nonlocal_obj(self):
         def f(x):
             def h(x):
