@@ -51,7 +51,13 @@ from .bytecode_transformation import (
     Instruction,
 )
 from .codegen import PyCodegen
-from .exc import collapse_resume_frames, get_stack_above_dynamo, unimplemented
+from .exc import (
+    collapse_resume_frames,
+    get_stack_above_dynamo,
+    handle_observed_exception,
+    ObservedAttributeError,
+    unimplemented,
+)
 from .source import AttrSource, GlobalSource, LocalCellSource, Source, TempLocalSource
 from .utils import (
     is_frozen_dataclass,
@@ -342,9 +348,9 @@ class SideEffects:
         """Record an attribute mutation for deferred validation.
 
         Returns True if successfully deferred, False if we cannot read the
-        original value (tp_getattro_impl raises NotImplementedError) or the
-        original is not a python constant — caller should fall back to
-        check_allowed_side_effect.
+        original value (tp_getattro_impl raises NotImplementedError, or the
+        attribute doesn't exist yet) or the original is not a python constant —
+        caller should fall back to check_allowed_side_effect.
         """
         key = (id(item), name)
         if not value.is_python_constant():
@@ -362,6 +368,9 @@ class SideEffects:
             try:
                 original_vt = item.tp_getattro_impl(tx, name)  # type: ignore[arg-type]
             except NotImplementedError:
+                return False
+            except ObservedAttributeError:
+                handle_observed_exception(tx)
                 return False
             if not original_vt.is_python_constant():
                 return False
