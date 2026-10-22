@@ -2579,6 +2579,16 @@ def aot_stage2_autograd(
         fw_compiler,
     )
 
+    if config.enable_complex_wrapper and not aot_config.disable_functionalization:
+        from .complex_decomposition import decompose_complex_in_graph
+
+        # Same pass as the forward's. Run it before the backward compile restrides the
+        # saved activations: it re-executes the graph's views on these values.
+        with torch.no_grad(), torch._C._DisableAutocast():
+            bw_module = decompose_complex_in_graph(
+                bw_module, fx_placeholder_vals(bw_module), aot_config.decompositions
+            )
+
     lazy_backward_info, compiled_bw_func = _aot_stage2b_bw_compile(
         bw_module,
         maybe_subclass_meta,

@@ -277,6 +277,77 @@ class ComplexTests(ComplexDynamoTestCase):
         fn_c = torch.compile(f, fullgraph=True)  # noqa: UNSPECIFIED_BACKEND
         self.assertEqual(f(xq, xk), fn_c(xq, xk))
 
+    @staticmethod
+    def _rope_with_cache_gather(x, cache, pos):
+        # Llama-style RoPE with the cache rows gathered by position.
+        freqs = cache[pos].unsqueeze(1)
+        xc = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
+        return torch.view_as_real(xc * freqs).flatten(-2).type_as(x)
+
+    @staticmethod
+    def _rope_inputs(cache_requires_grad):
+        g = torch.Generator().manual_seed(0)
+        cache = torch.polar(torch.ones(64, 16), torch.randn(64, 16, generator=g))
+        pos = torch.randint(0, 64, (16,), generator=g)
+        x = torch.randn(16, 4, 32, generator=g, requires_grad=True)
+        return x, cache.requires_grad_(cache_requires_grad), pos
+
+    @parametrize("dynamic", [False, True])
+    @parametrize("backend", ["aot_eager", "inductor"])
+    def test_rope_backward(self, backend, dynamic):
+        x, cache, pos = self._rope_inputs(cache_requires_grad=True)
+        x_ref, cache_ref = (t.detach().clone().requires_grad_() for t in (x, cache))
+        fn_c = torch.compile(
+            self._rope_with_cache_gather,
+            backend=backend,
+            fullgraph=True,
+            dynamic=dynamic,
+        )
+        fn_c(x, cache, pos).sum().backward()
+        self._rope_with_cache_gather(x_ref, cache_ref, pos).sum().backward()
+        self.assertEqual(x.grad, x_ref.grad)
+        self.assertEqual(cache.grad, cache_ref.grad)
+
+    def test_rope_backward_graph_is_real(self):
+        backend = torch._dynamo.testing.AotEagerAndRecordGraphs()
+        x, cache, pos = self._rope_inputs(cache_requires_grad=False)
+        torch.compile(self._rope_with_cache_gather, backend=backend, fullgraph=True)(
+            x, cache, pos
+        ).sum().backward()
+        (bw,) = backend.bw_graphs
+        # Views unpack complex inputs and aten.complex packs complex outputs; any other
+        # complex-valued op is complex math left for the eager fallback.
+        complex_math = [
+            n
+            for n in bw.graph.nodes
+            if n.op == "call_function"
+            and isinstance(n.meta.get("val"), torch.Tensor)
+            and n.meta["val"].is_complex()
+            and not getattr(n.target, "is_view", False)
+            and n.target is not torch.ops.aten.complex.default
+        ]
+        self.assertEqual(complex_math, [])
+        names = [n.name for n in bw.graph.find_nodes(op="placeholder")]
+        self.assertTrue(any(name.startswith("tangents_") for name in names), names)
+
+    @parametrize("backend", ["aot_eager", "inductor"])
+    def test_backward_accumulates_complex_grads(self, backend):
+        # Two consumers of one complex intermediate: the forward adds real values,
+        # the backward adds the two complex grads of xc.
+        def f(x, w1, w2):
+            xc = torch.view_as_complex(x.reshape(*x.shape[:-1], -1, 2))
+            return torch.view_as_real(xc * w1).sum() + torch.view_as_real(xc * w2).sum()
+
+        g = torch.Generator().manual_seed(0)
+        x = torch.randn(8, 16, generator=g, requires_grad=True)
+        w1, w2 = (
+            torch.randn(8, 8, dtype=torch.complex64, generator=g) for _ in range(2)
+        )
+        x_ref = x.detach().clone().requires_grad_()
+        torch.compile(f, backend=backend, fullgraph=True)(x, w1, w2).backward()
+        f(x_ref, w1, w2).backward()
+        self.assertEqual(x.grad, x_ref.grad)
+
 
 instantiate_parametrized_tests(ComplexTests)
 
