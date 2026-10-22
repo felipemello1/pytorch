@@ -241,5 +241,16 @@ def decompose_complex_in_graph(
     # Tracing subclass construction records unused metadata queries (e.g. `aten.is_pinned`)
     # that Inductor has no lowering for.
     out.graph.eliminate_dead_code()
+    # make_fx names the inputs arg{i}_1. Keep the original names and meta: Inductor's
+    # backward compiler finds tangents and static inputs by them (count_tangents,
+    # get_static_bw_input_idxs, meta["is_static_input"]).
+    for old, new in zip(
+        gm.graph.find_nodes(op="placeholder"),
+        out.graph.find_nodes(op="placeholder"),
+        strict=True,
+    ):
+        new._rename(old.name)
+        new.target = old.target
+        new.meta.update({k: v for k, v in old.meta.items() if k != "val"})
     out.recompile()
     return out
