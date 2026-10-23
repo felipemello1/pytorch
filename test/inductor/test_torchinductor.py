@@ -21724,6 +21724,82 @@ if RUN_GPU:
             code = run_and_get_triton_code(torch.compile(f), x, y)
             self.assertIn("ReductionHint.INNER", code)
 
+        def _has_reduction_kernel(self, fn, *args):
+            torch._dynamo.reset()
+            out, (code,) = run_and_get_code(torch.compile(fn), *args)
+            self.assertEqual(out, fn(*args), atol=1e-2, rtol=1e-2)
+            return "triton_per" in code or "triton_red" in code
+
+        @parametrize("K", (8, 32))
+        def test_unroll_small_outer_reduction(self, K):
+            T, D = 64, 256
+            x = torch.randn(T, K, D, device=GPU_TYPE, dtype=torch.bfloat16)
+            s = torch.rand(T, K, device=GPU_TYPE)
+            rows = torch.randn(T * K, D, device=GPU_TYPE, dtype=torch.bfloat16)
+            idx = torch.randperm(T * K, device=GPU_TYPE).view(T, K)
+            a = torch.randn(T * K, 64, device=GPU_TYPE, dtype=torch.bfloat16)
+            b = torch.randn(64, D, device=GPU_TYPE, dtype=torch.bfloat16)
+
+            def gather(rows, idx):
+                return rows[idx.flatten()].unflatten(0, (T, K)).float()
+
+            for fn, args in (
+                (lambda x: x.float().sum(1), (x,)),
+                (lambda x, s: (x.float() * s[..., None]).sum(1), (x, s)),
+                (lambda r, i: gather(r, i).sum(1), (rows, idx)),
+                (
+                    lambda r, i, s: (gather(r, i) * s[..., None]).sum(1),
+                    (rows, idx, s),
+                ),
+                (lambda x: x.float().amax(1), (x,)),
+                (lambda x: x.float().argmax(1), (x,)),
+                # a trailing size-1 output dim
+                (lambda x: x.float().unsqueeze(-1).sum(1), (x,)),
+                # an extern kernel's output
+                (lambda a, b: (a @ b).view(T, K, D).float().sum(1), (a, b)),
+            ):
+                self.assertFalse(self._has_reduction_kernel(fn, *args), fn)
+
+            # contiguous along K: stays a reduction; no read contiguous along the
+            # output's last dim: declined too (a conservative choice, not measured)
+            y = torch.randn(T * D, K, device=GPU_TYPE, dtype=torch.bfloat16)
+            self.assertTrue(self._has_reduction_kernel(lambda y: y.float().sum(-1), y))
+            self.assertTrue(
+                self._has_reduction_kernel(
+                    lambda x: x.float().transpose(0, 2).sum(1), x
+                )
+            )
+
+            # producers realized in this graph: one that is also an output, and one
+            # whose layout will follow its K-contiguous inputs
+            def realized(x):
+                y = x.float() * 2
+                return y, y.sum(1)
+
+            def permuted(*inputs):
+                y = sum(t.permute(0, 2, 1).sin() for t in inputs)
+                return y.sum(1), y.amax(1)
+
+            self.assertTrue(self._has_reduction_kernel(realized, x))
+            inputs = [torch.randn(T, D, K, device=GPU_TYPE) for _ in range(5)]
+            self.assertTrue(self._has_reduction_kernel(permuted, *inputs))
+
+        def test_unroll_small_outer_reduction_dynamic_tokens(self):
+            x = torch.randn(64, 16, 256, device=GPU_TYPE)
+            torch._dynamo.mark_dynamic(x, 0)
+            self.assertFalse(self._has_reduction_kernel(lambda x: x.sum(1), x))
+
+        def test_unroll_outer_reductions_limits(self):
+            x = torch.randn(64, 16, 256, device=GPU_TYPE)
+            for patch in (
+                {"unroll_reductions_threshold": 1},
+                {"unroll_outer_reductions_max_numel": 0},
+            ):
+                with config.patch(patch):
+                    self.assertTrue(self._has_reduction_kernel(lambda x: x.sum(1), x))
+            x = torch.randn(64, 33, 256, device=GPU_TYPE)
+            self.assertTrue(self._has_reduction_kernel(lambda x: x.sum(1), x))
+
         def test_numpy_on_gpu(self):
             x = np.arange(10, dtype=np.float32)
 
