@@ -1332,6 +1332,50 @@ class AOTAutogradCacheTests(CacheKeyEquivalenceMixin, InductorTestCase):
         self.assertEqual(counters["aot_autograd"]["autograd_cache_miss"], 1)
         self.assertEqual(fn(a3), result)
 
+    @inductor_config.patch("fx_graph_remote_cache", False)
+    @inductor_config.patch("fx_graph_cache", True)
+    @functorch_config.patch({"enable_autograd_cache": True})
+    @parametrize("packet", (False, True))
+    def test_custom_op_fake_change_misses(self, packet):
+        """
+        A custom op's fake decides the strides the rest of the graph is compiled
+        against, so a new fake must miss instead of reusing stale code. Calling
+        the packet (torch.ops.ns.op) leaves an OpOverloadPacket in Dynamo's graph.
+        """
+        keep_strides = False
+        name = f"aot_fake_change_{int(packet)}"
+
+        @torch.library.custom_op(f"mylib::{name}", mutates_args=())
+        def op(x: torch.Tensor) -> torch.Tensor:
+            if keep_strides:
+                return x.clone()
+            return x.clone(memory_format=torch.contiguous_format)
+
+        call = getattr(torch.ops.mylib, name)
+        if not packet:
+            call = call.default
+
+        def fn(x):
+            return call(x * 2) + 1
+
+        x = torch.randn(64, 32).t()
+        op.register_fake(lambda x: x.new_empty(x.shape))
+        self.assertEqual(torch.compile(fn)(x), fn(x))
+        self.assertEqual(counters["aot_autograd"]["autograd_cache_miss"], 1)
+
+        # The same fake hits.
+        self._clear_dynamo_and_codecache()
+        self.assertEqual(torch.compile(fn)(x), fn(x))
+        self.assertEqual(counters["aot_autograd"]["autograd_cache_hit"], 1)
+
+        # A fake that keeps the input's strides misses.
+        self._clear_dynamo_and_codecache()
+        keep_strides = True
+        op.register_fake(lambda x: torch.empty_like(x))
+        self.assertEqual(torch.compile(fn)(x), fn(x))
+        self.assertEqual(counters["aot_autograd"]["autograd_cache_miss"], 2)
+        self.assertEqual(counters["aot_autograd"]["autograd_cache_hit"], 1)
+
     @requires_gpu_and_triton
     @inductor_config.patch("fx_graph_remote_cache", False)
     @inductor_config.patch("fx_graph_cache", True)

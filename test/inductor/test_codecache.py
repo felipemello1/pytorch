@@ -2170,6 +2170,56 @@ class TestFxGraphCache(TestCase):
             self.assertEqual(counters["inductor"]["fxgraph_cache_hit"], 1)
             self.assertEqual(counters["inductor"]["fxgraph_lookup_write_file"], 1)
 
+    @config.patch({"fx_graph_cache": True})
+    @config.patch({"fx_graph_remote_cache": False})
+    @parametrize("dynamic", (False, True))
+    @parametrize("kind", ("functional", "mutating", "effectful"))
+    def test_custom_op_fake_change_misses(self, dynamic, kind):
+        """
+        A custom op's fake decides the strides the rest of the graph is compiled
+        against, so a new fake must miss instead of reusing stale code. Mutating
+        and effectful ops reach the graph wrapped in auto_functionalized_v2 and
+        with_effects.
+        """
+        keep_strides = False
+        name = f"mylib::fake_change_{kind}_{int(dynamic)}"
+
+        @torch.library.custom_op(
+            name, mutates_args=["out"] if kind == "mutating" else ()
+        )
+        def op(x: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+            if kind == "mutating":  # only this kind writes out
+                out.copy_(x)
+            if keep_strides:
+                return x.clone()
+            return x.clone(memory_format=torch.contiguous_format)
+
+        if kind == "effectful":
+            lib = torch.library.Library("mylib", "FRAGMENT")
+            self.addCleanup(lib._destroy)
+            torch.library._register_effectful_op(name, _EffectType.ORDERED, lib=lib)
+
+        def fn(x):
+            return op(x * 2, torch.empty_like(x)) + 1
+
+        x = torch.randn(64, 32).t()
+        op.register_fake(lambda x, out: x.new_empty(x.shape))
+        self.assertEqual(torch.compile(fn, dynamic=dynamic)(x), fn(x))
+        self.assertEqual(counters["inductor"]["fxgraph_cache_miss"], 1)
+
+        # The same fake hits.
+        self.reset()
+        self.assertEqual(torch.compile(fn, dynamic=dynamic)(x), fn(x))
+        self.assertEqual(counters["inductor"]["fxgraph_cache_hit"], 1)
+
+        # A fake that keeps the input's strides misses.
+        self.reset()
+        keep_strides = True
+        op.register_fake(lambda x, out: torch.empty_like(x))
+        self.assertEqual(torch.compile(fn, dynamic=dynamic)(x), fn(x))
+        self.assertEqual(counters["inductor"]["fxgraph_cache_miss"], 2)
+        self.assertEqual(counters["inductor"]["fxgraph_cache_hit"], 1)
+
     @requires_gpu_and_triton
     @config.patch({"fx_graph_cache": True})
     @config.patch({"fx_graph_remote_cache": False})
