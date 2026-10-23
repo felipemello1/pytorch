@@ -84,15 +84,21 @@ class DeterministicTest(TestCase):
             else:
                 self.assertTrue(counters["inductor"]["select_algorithm_autotune"] > 0)
 
-    def test_pointwise_coordesc_tuning(self):
-        @torch.compile(mode="max-autotune")
-        def f(x):
-            return x + 1
+    @parametrize("deterministic", [False, True])
+    def test_pointwise_coordesc_tuning(self, deterministic):
+        with inductor_config.patch(deterministic=deterministic):
 
-        x = torch.randn(2048, device=GPU_TYPE)
-        self.assertEqual(f(x), x + 1)
+            @torch.compile(mode="max-autotune")
+            def f(x):
+                return x + 1
 
-        self.assertTrue(counters["inductor"]["coordesc_tuning_bench"] > 0)
+            x = torch.randn(2048, device=GPU_TYPE)
+            self.assertEqual(f(x), x + 1)
+
+            if deterministic:
+                self.assertTrue(counters["inductor"]["coordesc_tuning_bench"] == 0)
+            else:
+                self.assertTrue(counters["inductor"]["coordesc_tuning_bench"] > 0)
 
     @parametrize("deterministic", [False, True])
     def test_reduction_coordesc_tuning(self, deterministic):

@@ -65,6 +65,7 @@ from torch._inductor.runtime.triton_heuristics import (
     check_autotune_cache,
     DEFER,
     make_matmul_triton_config,
+    pointwise,
     template,
     triton_config,
 )
@@ -364,6 +365,24 @@ class TestTritonHeuristics(TestCase):
         self.assertEqual(first_r0_block(ReductionHeuristic(), 10, 100), 1024)
         self.assertEqual(first_r0_block(ROCmReductionHeuristic(), 12, 120), 2048)
         self.assertEqual(first_r0_block(ROCmReductionHeuristic(), 9, 95), 2048)
+
+    def test_deterministic_pointwise_has_one_config(self):
+        triton_meta = {"device": self._fake_cuda_device_properties()}
+        for size_hints in ({"x": 2**20}, {"y": 2**10, "x": 2**10}):
+            configs = pointwise(
+                size_hints,
+                triton_meta=triton_meta,
+                inductor_meta={"deterministic": True},
+                return_configs=True,
+            )
+            # the config used when pointwise autotuning is off
+            (expected,) = pointwise(
+                size_hints,
+                triton_meta=triton_meta,
+                inductor_meta={"autotune_pointwise": False},
+                return_configs=True,
+            )
+            self.assertEqual([c.kwargs for c in configs], [expected.kwargs])
 
     def test_cached_autotune_enforces_reduction_min_block(self):
         def triton_fn(XBLOCK: tl.constexpr, R0_BLOCK: tl.constexpr):
