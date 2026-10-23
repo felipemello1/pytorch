@@ -1895,7 +1895,10 @@ def use_deterministic_algorithms(
         very sensitive to triton configs. In deterministic mode, Inductor
         will use some heuristics to pick the most promising configs rather
         than do autotuning.
-      - Skip autotuning for reduction in coordinate descent tuning.
+      - don't autotune triton configs for pointwise kernels. Block sizes can
+        change which products get contracted into FMAs, so Inductor uses the
+        first config of the heuristic.
+      - Skip coordinate descent tuning.
       - Don't benchmark for the computation/communication reordering pass
       - Disable the feature that dynamically scale down RBLOCK triton config for higher
         occupancy.

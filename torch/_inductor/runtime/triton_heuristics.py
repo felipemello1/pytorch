@@ -2363,11 +2363,12 @@ class CachingAutotuner(KernelInterface):
             HeuristicType.FIXED,
         ):
             return False
-        # Deterministic mode (and strict numerics) forbid tuning RBLOCK / num_warps for
-        # reductions because those knobs shift numerics.
-        if (
-            self.deterministic_mode or "strict_reduction_rblock" in self.inductor_meta
-        ) and self.heuristic_type in (
+        # Deterministic mode forbids tuning any config by timing: RBLOCK / num_warps of
+        # reductions and block sizes of pointwise kernels all shift numerics.
+        if self.deterministic_mode:
+            return False
+        # Strict numerics forbid tuning RBLOCK / num_warps for reductions.
+        if "strict_reduction_rblock" in self.inductor_meta and self.heuristic_type in (
             HeuristicType.REDUCTION,
             HeuristicType.PERSISTENT_REDUCTION,
             HeuristicType.SPLIT_SCAN,
@@ -4765,6 +4766,10 @@ def pointwise(
     )
 
     configs = _maybe_filter_configs_for_tma_restrictions(inductor_meta, configs)
+    if inductor_meta.get("deterministic"):
+        # Block sizes can change which products get contracted into FMAs, so picking
+        # a config by timing could change numerics from run to run.
+        configs = configs[:1]
     if return_configs:
         return configs
 
