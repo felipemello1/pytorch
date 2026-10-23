@@ -1777,6 +1777,80 @@ class Reduction(Loops):
             value_fn = inner_fn
             return fn
 
+    @staticmethod
+    def _reads_strided_along_reduction(
+        device: torch.device,
+        dst_dtype: torch.dtype,
+        src_dtype: torch.dtype,
+        inner_fn: Callable[..., OpsValue],
+        ranges: Sequence[_IntLike],
+        reduction_ranges: Sequence[_IntLike],
+        reduction_type: ReductionType,
+    ) -> bool:
+        """
+        Every read that moves with the output's innermost dim is strided or gathered
+        along the reduced dims, and one that moves along them too is contiguous along
+        that innermost dim. Unrolled, each output element then does K coalesced loads,
+        while a persistent reduction over such a dim runs well below bandwidth. Small
+        per-row operands, e.g. [T, K] scores or ids, don't vote. A read that moves
+        along K directly (not through a gather) of a buffer computed in this graph
+        declines: the reduction kernel would compute that buffer in the same kernel.
+        """
+        r = Reduction(
+            device=device,
+            dtype=dst_dtype,
+            inner_fn=inner_fn,
+            ranges=ranges,
+            reduction_ranges=reduction_ranges,
+            reduction_type=reduction_type,
+            src_dtype=src_dtype,
+            reduction_hint=ReductionHint.DEFAULT,
+        )
+        cb = ComputedBuffer(
+            name=None,
+            layout=FlexibleLayout(device=device, dtype=dst_dtype, size=r.get_size()),
+            data=r,
+        )
+        # Reads at the producers' current strides: unlike num_splits, don't call
+        # decide_layout(), so this check doesn't freeze their layouts.
+        reads = cb.get_read_writes().reads
+        (range_vars, reduction_vars), var_ranges = dependencies.index_vars_squeeze(
+            r.get_size(), r.get_reduction_size()
+        )
+        # size-1 dims come back as the constant 0
+        range_vars = [v for v in range_vars if not isinstance(v, sympy.Number)]
+        reduction_vars = [v for v in reduction_vars if not isinstance(v, sympy.Number)]
+        if not range_vars or not reduction_vars:
+            return False
+        innermost = range_vars[-1]
+        coalesced = False
+        for dep in reads:
+            if not isinstance(dep, dependencies.MemoryDep):
+                continue
+            index = V.graph.sizevars.simplify_with_ranges(dep.index, var_ranges)
+            if innermost not in index.free_symbols:
+                continue
+            # a gathered read varies along K only through an indirect load: stride 0
+            strides = V.graph.sizevars.stride_hints(
+                index, reduction_vars, list(var_ranges)
+            )
+            if any(abs(s) == 1 for s in strides):
+                return False
+            if not dep.is_indirect():
+                # only bulk reads, which move along K, say how the data is laid out;
+                # a broadcast operand such as w[D] doesn't
+                if not any(v in index.free_symbols for v in reduction_vars):
+                    continue
+                # a producer realized in this graph would fuse into the reduction
+                # kernel but stays a separate kernel next to the unrolled sum (and its
+                # layout may not be decided yet)
+                if isinstance(V.graph.try_get_buffer(dep.name), ComputedBuffer):
+                    return False
+            coalesced |= V.graph.sizevars.stride_hints(
+                index, [innermost], list(var_ranges)
+            ) == [1]
+        return coalesced
+
     @classmethod
     # pyrefly: ignore [bad-override]
     def create(
@@ -1933,10 +2007,30 @@ class Reduction(Loops):
 
         if (
             isinstance(reduction_numel, Integer)
-            and int(reduction_numel) < config.unroll_reductions_threshold
             and (sympy_product(ranges) != 1 or is_gpu(device.type))
             and reduction_type != "dot"
             and not strict_reduction
+            and (
+                int(reduction_numel) < config.unroll_reductions_threshold
+                or (
+                    config.unroll_reductions_threshold > 1
+                    and int(reduction_numel) <= config.unroll_outer_reductions_max_numel
+                    and is_gpu(device.type)
+                    and is_triton(device)
+                    and V.graph.sizevars.all_unbacked_explicitly_hinted(
+                        [sympy_product(ranges)]
+                    )
+                    and cls._reads_strided_along_reduction(
+                        device,
+                        dst_dtype,
+                        src_dtype,
+                        inner_fn,
+                        ranges,
+                        reduction_ranges,
+                        reduction_type,
+                    )
+                )
+            )
         ):
             # When native matmul, don't unroll the dot reduction.
 

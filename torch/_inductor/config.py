@@ -1145,6 +1145,11 @@ force_pointwise_cat = False
 # replace small reductions with pointwise, disable with `= 1`
 unroll_reductions_threshold = 8
 
+# also unroll outer reductions of up to this many elements: the data they read is
+# strided or gathered along the reduced dims, e.g. [T, K, D].sum(1) or
+# rows[idx].sum(1). 0 disables; unroll_reductions_threshold = 1 still disables all.
+unroll_outer_reductions_max_numel = 32
+
 # Add extra comments to output code (causes compile cache misses)
 comment_origin = False
 
