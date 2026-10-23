@@ -1480,6 +1480,31 @@ class FxGraphHashDetails:
         )
 
     @classmethod
+    def _custom_op_output_metadata(
+        cls, node: torch.fx.Node
+    ) -> tuple[str, tuple[Any, ...]] | None:
+        """(op name, output metadata) when the node runs a custom op, called directly
+        or through a HOP such as auto_functionalized_v2 or with_effects, which take
+        the op as an argument."""
+        if node.op != "call_function":
+            return None
+        ops: tuple[object, ...] = (node.target,)
+        if isinstance(node.target, torch._ops.HigherOrderOperator):
+            # any argument: auto_functionalized_v2(op, ...), with_effects(token, op, ...)
+            ops += tuple(node.args)
+        for op in ops:
+            if isinstance(op, torch._ops.OpOverload):
+                namespace = op.namespace
+            elif isinstance(op, torch._ops.OpOverloadPacket):
+                namespace = op._qualified_op_name.split("::")[0]
+            else:
+                continue
+            # the namespaces torch._library.utils.is_builtin treats as built in
+            if namespace not in ("aten", "prim", "prims"):
+                return str(op), cls._tensor_metadata(node)
+        return None
+
+    @classmethod
     def _factory_device_type(cls, node: torch.fx.Node) -> str | None:
         if node.op != "call_function":
             return None
@@ -1675,6 +1700,18 @@ class FxGraphHashDetails:
                     self.user_defined_triton_source.append(
                         (kernel_source, constant_args, configs)
                     )
+
+        # gm's reduce function hashes code, not node meta, but a custom op's fake
+        # decides the sizes and strides the rest of the graph is compiled against,
+        # so key on the outputs it produced.
+        self.custom_op_output_metadata: list[tuple[str, tuple[Any, ...]]] = []
+        if gm is not None:
+            for module in gm.modules():
+                if not isinstance(module, torch.fx.GraphModule):
+                    continue
+                for node in module.graph.nodes:
+                    if (entry := self._custom_op_output_metadata(node)) is not None:
+                        self.custom_op_output_metadata.append(entry)
 
         no_tensor_inputs = not any(isinstance(x, torch.Tensor) for x in example_inputs)
         # This device index is usually already encoded by the device of the inputs
