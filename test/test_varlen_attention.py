@@ -1477,6 +1477,33 @@ class TestVarlenAttentionCUDA(_VarlenVsSdpaMixin, NNTestCase):
             )
             self.assertEqual(out_buf, out)
 
+    @unittest.skipIf(
+        not SM100OrLater or SM120OrLater, "FA4 varlen backward needs SM100"
+    )
+    def test_fa4_backward_gets_max_seqlen(self, device):
+        """FA4's backward gets the forward's max lengths, so its heuristics (packed GQA,
+        tile scheduling) see document lengths instead of the whole packed batch."""
+        import torch.nn.attention._fa4 as fa4
+
+        q = torch.randn(1024, 8, 64, device=device, dtype=torch.bfloat16)
+        k, v = (
+            torch.randn(1024, 2, 64, device=device, dtype=torch.bfloat16)
+            for _ in range(2)
+        )
+        q, k, v = (t.requires_grad_() for t in (q, k, v))
+        cu_seq = torch.tensor(
+            [0, 256, 512, 768, 1024], device=device, dtype=torch.int32
+        )
+        with use_fa4(), sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+            module = fa4._fa4_import_module(fa4._FA4_MODULE_PATH)
+            with patch.object(
+                module, "_flash_attn_bwd", wraps=module._flash_attn_bwd
+            ) as bwd:
+                out = varlen_attn(q, k, v, cu_seq, cu_seq, 256, 256, enable_gqa=True)
+                out.sum().backward()
+        self.assertEqual(bwd.call_args.kwargs["max_seqlen_q"], 256)
+        self.assertEqual(bwd.call_args.kwargs["max_seqlen_k"], 256)
+
 
 class TestVarlenAttentionCuDNN(_VarlenVsSdpaMixin, NNTestCase):
     # cuDNN is the only varlen backend with dedicated aten ops
