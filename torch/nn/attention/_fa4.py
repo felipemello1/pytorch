@@ -246,13 +246,13 @@ def _fa4_run_backward(
     logsumexp: torch.Tensor,
     cu_seq_q: torch.Tensor | None,
     cu_seq_k: torch.Tensor | None,
+    max_q: int | None,
+    max_k: int | None,
     scale: float | None,
     is_causal: bool,
     window_size_left: int | None,
     window_size_right: int | None,
     deterministic: bool = False,
-    max_q: int | None = None,
-    max_k: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if _FA4_MODULE_PATH is None:
         raise RuntimeError("FA4 not registered")
@@ -270,10 +270,8 @@ def _fa4_run_backward(
         window_size_right=_aten_to_fa4_window_size(window_size_right),
         cu_seqlens_q=cu_seq_q,
         cu_seqlens_k=cu_seq_k,
-        # Pass the max lengths as the forward does: without them, FA4's backward
-        # heuristics (packed GQA, tile scheduling) see the whole packed batch as one sequence.
-        max_seqlen_q=max_q if cu_seq_q is not None else None,
-        max_seqlen_k=max_k if cu_seq_k is not None else None,
+        max_seqlen_q=max_q,
+        max_seqlen_k=max_k,
         deterministic=deterministic,
     )
     return dq, dk, dv
@@ -430,13 +428,13 @@ def _fa4_flash_attention_backward_impl(
         logsumexp,
         cum_seq_q,
         cum_seq_k,
+        max_q,
+        max_k,
         scale,
         is_causal,
         window_size_left,
         window_size_right,
         deterministic,
-        max_q=max_q,
-        max_k=max_k,
     )
     return dq, dk, dv
 
