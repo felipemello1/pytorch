@@ -678,10 +678,16 @@ class ReductionHeuristic(CodegenConfigHeuristics):
             required_x_block = max(
                 required_x_block, tma_min_block_sizes.get("XBLOCK", 1)
             )
+        # num_warps does not grow with XBLOCK, so a larger XBLOCK puts more values on
+        # each thread. Keep XBLOCK x R0_BLOCK <= 16384 (size hints are powers of 2, so
+        # rnumel_hint is R0_BLOCK; a TMA minimum still wins). At 32768 values, RMSNorm
+        # backward on [262144, 7168] ran 8.8x slower on GB300.
+        max_x_block = max(16384 // rnumel_hint, required_x_block)
         x_block = last_power_of_2(
             min(
                 max(rsplit_size // 32, min_x_block, required_x_block),
                 TRITON_MAX_MIX_ORDER_XBLOCK,
+                max_x_block,
             )
         )
         while rsplit_size % x_block != 0:

@@ -1915,6 +1915,33 @@ class MixOrderReductionHeuristicTest(TestBase):
             stages = self._gen_num_stages(tma=tma, allow_multi_stages=False)
             self.assertEqual(stages, {1}, f"tma={tma}: expected {{1}}, got {stages}")
 
+    def test_xblock_capped_for_wide_rows(self):
+        """
+        RSPLIT_SIZE 128 asks for XBLOCK 4. XBLOCK x R0_BLOCK stays <= 16384:
+        r0_ 4096 keeps XBLOCK 4, 8192 gets 2, 16384 gets 1. A TMA minimum
+        XBLOCK of 4 still wins at r0_ 8192.
+        """
+        for rnumel, tma_x_block, x_block in (
+            (4096, 1, 4),
+            (8192, 1, 2),
+            (16384, 1, 1),
+            (8192, 4, 4),
+        ):
+            configs = persistent_reduction(
+                {"x": 4096, "r0_": rnumel},
+                triton_meta={
+                    "device": DeviceProperties(
+                        type="cpu", index=0, multi_processor_count=1, cc=0
+                    )
+                },
+                inductor_meta={
+                    "RSPLIT_SIZE": 128,
+                    "tma_min_block_sizes": {"XBLOCK": tma_x_block},
+                },
+                return_configs=True,
+            )
+            self.assertEqual({c.kwargs["XBLOCK"] for c in configs}, {x_block})
+
     def test_device_tma_disables_multi_stages_across_shapes(self):
         for rsplit_size in (16, 64, 128, 256):
             for rnumel in (256, 1024, 8192, 16384):
