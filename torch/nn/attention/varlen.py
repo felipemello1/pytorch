@@ -105,6 +105,27 @@ def _cudnn_supports_head_dims(
     return cudnn_version >= 91900 and dims in _CUDNN_SM100_BACKWARD_LARGE_HEAD_DIMS
 
 
+def _cudnn_forward_bounds(
+    query: torch.Tensor, max_q: int, max_k: int, seqused_k: torch.Tensor | None
+) -> tuple[int, int]:
+    """Return (max_q, max_k) for cuDNN's ragged forward, rounded up to 256 where that is faster.
+
+    cuDNN 9.27's causal ragged forward on SM10x is ~1.1-1.6x slower, with the same output,
+    when max_q/max_k aren't multiples of 256. A larger bound is still valid. Non-causal
+    calls are rounded too: same speed, same output.
+
+    Example:
+        SM10x, max_q = max_k = 14196   -> (14336, 14336)
+        SM10x, max_q = 100             -> unchanged: cuDNN runs another kernel at <= 128
+        seqused_k set (KV cache)       -> unchanged: not measured
+        SM90                           -> unchanged: not measured
+    """
+    _, major_cap = _cudnn_version_and_major_capability(query.device.index)
+    if major_cap != 10 or seqused_k is not None or max_q <= 128:
+        return max_q, max_k
+    return (max_q + 255) // 256 * 256, (max_k + 255) // 256 * 256
+
+
 def _cudnn_rejection_reasons(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -256,6 +277,7 @@ def _varlen_attn(
 
     if backend == _CUDNN_ATTENTION_BACKEND:
         log.info("Using cuDNN backend for varlen_attn")
+        max_q, max_k = _cudnn_forward_bounds(query, max_q, max_k, seqused_k)
         result = torch.ops.aten._cudnn_attention_forward(
             query=query,
             key=key,
@@ -542,6 +564,7 @@ def _varlen_attn_out(
 
     if backend == _CUDNN_ATTENTION_BACKEND:
         log.info("Using cuDNN backend for varlen_attn_out")
+        max_q, max_k = _cudnn_forward_bounds(query, max_q, max_k, seqused_k)
         return torch.ops.aten._cudnn_attention_forward_no_dropout_inplace(
             out,
             query,
