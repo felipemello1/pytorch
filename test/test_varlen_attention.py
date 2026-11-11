@@ -460,7 +460,7 @@ class _VarlenVsSdpaMixin:
             num_kv_heads=num_kv_heads,
         )
 
-        seq_lengths = [256, 192, 128, 64] if _should_use_cudnn else None
+        seq_lengths = [300, 192, 128, 64] if _should_use_cudnn else None
         batch_data = create_variable_length_batch(
             shape, device, dtype, seq_lengths=seq_lengths
         )
