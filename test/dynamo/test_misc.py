@@ -12976,7 +12976,9 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
         opt_cos = torch.compile(cos, backend="aot_eager")
         for rows in (8, 32):
             x = torch.randn(rows, 3)
-            torch._dynamo.mark_unbacked(x, 0, specialize_on=[lambda s: s > 16])
+            torch._dynamo.decorators.mark_unbacked(
+                x, 0, specialize_on=[lambda s: s > 16]
+            )
             self.assertEqual(opt_cos(x), cos(x))
 
     def test_maybe_mark_dynamic_range_with_propagated_dynamic_dim(self):
