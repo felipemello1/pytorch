@@ -12965,7 +12965,9 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
         torch._dynamo.reset()
         opt_fn = torch.compile(fn, backend="aot_eager")
         gate, x = make_inputs(8)
-        with self.assertRaises(torch.fx.experimental.symbolic_shapes.ConstraintViolationError):
+        with self.assertRaises(
+            torch.fx.experimental.symbolic_shapes.ConstraintViolationError
+        ):
             opt_fn(gate, x)
 
         # An unbacked size has no backed symbol: only the generic graph runs.
